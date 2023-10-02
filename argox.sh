@@ -5,12 +5,11 @@ VERSION=1.1
 
 # 各变量默认值
 CDN='https://ghproxy.com'
-SERVER_DEFAULT='icook.tw'
-UUID_DEFAULT='ffffffff-ffff-ffff-ffff-ffffffffffff'
-WS_PATH_DEFAULT='argox'
+SERVER_DEFAULT='cfip.gay'
 WORK_DIR='/etc/argox'
 CLOUDFLARED_PORT='54321'
 TEMP_DIR='/tmp/argox'
+START_PORT_DEFAULT='9991'
 
 trap "rm -rf $TEMP_DIR; echo -e '\n' ;exit 1" INT QUIT TERM EXIT
 
@@ -214,6 +213,23 @@ check_system_ip() {
   fi
 }
 
+# 输入起始 port 函数
+enter_start_port() {
+  local PORT_ERROR_TIME=6
+  while true; do
+    unset IN_USED
+    (( PORT_ERROR_TIME-- )) || true
+    [ "$PORT_ERROR_TIME" = 0 ] && error "\n $(text 3) \n" || reading "\n $(text_eval 11) " START_PORT
+    START_PORT=${START_PORT:-"$START_PORT_DEFAULT"}
+    if [[ "$START_PORT" =~ ^[1-9][0-9]{3,4}$ && "$START_PORT" -ge "$MIN_PORT" && "$START_PORT" -le "$MAX_PORT" ]]; then
+      for port in $(eval echo {$START_PORT..$((START_PORT+CONSECUTIVE_PORTS))}); do
+        lsof -i:$port >/dev/null 2>&1 && IN_USED+=("$port")
+      done
+      [ "${#IN_USED[*]}" -eq 0 ] && break || warning "\n $(text_eval 44) \n"
+    fi
+  done
+}
+
 # 定义 Argo 变量
 argo_variable() {
   [ -z "$ARGO_DOMAIN" ] && reading "\n $(text 10) " ARGO_DOMAIN
@@ -232,26 +248,41 @@ argo_variable() {
   fi
 }
 
-# 定义 Xray 变量
-xray_variable() {
-  [ -z "$SERVER" ] && reading "\n $(text_eval 42) " SERVER
-  SERVER=${SERVER:-"$SERVER_DEFAULT"}
+# 定义 Sing-box 变量
+sing-box_variable() {
+  if grep -qi 'cloudflare' <<< "$ASNORG4$ASNORG6"; then
+    error "\n $(text 46) \n"
+  elif [ -n "$WAN4" ]; then
+    SERVER_IP_DEFAULT=$WAN4
+  elif [ -n "$WAN6" ]; then
+    SERVER_IP_DEFAULT=$WAN6
+  fi
 
+  reading "\n $(text_eval 10) " SERVER_IP
+  SERVER_IP=${SERVER_IP:-"$SERVER_IP_DEFAULT"}
+  [ -z "$SERVER_IP" ] && error " $(text 47) "
+  [ -n "$SERVER_IP" ] && [ -z "$START_PORT" ] && enter_start_port
+
+  wait
+  UUID_DEFAULT=$($TEMP_DIR/sing-box generate uuid)
+  WS_PATH_DEFAULT=$(echo $UUID_DEFAULT | awk -F- '{print $1}')
   [ -z "$UUID" ] && reading "\n $(text_eval 12) " UUID
-  local a=5
+  local UUID_ERROR_TIME=5
   until [[ -z "$UUID" || "$UUID" =~ ^[A-F0-9a-f]{8}-[A-F0-9a-f]{4}-[A-F0-9a-f]{4}-[A-F0-9a-f]{4}-[A-F0-9a-f]{12}$ ]]; do
-    (( a-- )) || true
-    [ "$a" = 0 ] && error " $(text 3) " || reading " $(text_eval 4) " UUID
+    (( UUID_ERROR_TIME-- )) || true
+    [ "$UUID_ERROR_TIME" = 0 ] && error "\n $(text 3) \n" || reading "\n $(text_eval 4) \n" UUID
   done
   UUID=${UUID:-"$UUID_DEFAULT"}
 
-  [ -z "$WS_PATH" ] && reading "\n $(text_eval 13) " WS_PATH
-  local a=5
-  until [[ -z "$WS_PATH" || "$WS_PATH" =~ ^[A-Z0-9a-z]+$ ]]; do
-    (( a-- )) || true
-    [ "$a" = 0 ] && error " $(text 3) " || reading " $(text_eval 14) " WS_PATH
-  done
-  WS_PATH=${WS_PATH:-"$WS_PATH_DEFAULT"}
+  if [ -s /etc/hostname ]; then
+    NODE_NAME_DEFAULT="$(cat /etc/hostname)"
+  elif [ $(type -p hostname) ]; then
+    NODE_NAME_DEFAULT="$(hostname)"
+  else
+    NODE_NAME_DEFAULT="Sing-Box"
+  fi
+  reading "\n $(text_eval 13) " NODE_NAME
+  NODE_NAME="${NODE_NAME:-"$NODE_NAME_DEFAULT"}"
 }
 
 check_dependencies() {
@@ -340,197 +371,142 @@ EOF
 
   # 生成配置文件及守护进程文件
   local i=1
+  sing-box_variable
   [ ! -s $WORK_DIR/xray ] && wait && while [ "$i" -le 20 ]; do [[ -s $TEMP_DIR/xray && -s $TEMP_DIR/geoip.dat && -s $TEMP_DIR/geosite.dat ]] && mv $TEMP_DIR/{xray,geo*.dat} $WORK_DIR && break; ((i++)); sleep 2; done
   [ "$i" -ge 20 ] && local APP=Xray && error "\n $(text_eval 48) "
   cat > $WORK_DIR/inbound.json << EOF
 {
-    "log":{
-        "access":"/dev/null",
-        "error":"/dev/null",
-        "loglevel":"none"
-    },
-    "inbounds":[
-        {
-            "listen":"127.0.0.1",
-            "port":8080,
-            "protocol":"vless",
-            "settings":{
-                "clients":[
-                    {
-                        "id":"${UUID}",
-                        "flow":"xtls-rprx-vision"
-                    }
-                ],
-                "decryption":"none",
-                "fallbacks":[
-                    {
-                        "dest":3001
-                    },
-                    {
-                        "path":"/${WS_PATH}-vl",
-                        "dest":3002
-                    },
-                    {
-                        "path":"/${WS_PATH}-vm",
-                        "dest":3003
-                    },
-                    {
-                        "path":"/${WS_PATH}-tr",
-                        "dest":3004
-                    },
-                    {
-                        "path":"/${WS_PATH}-sh",
-                        "dest":3005
-                    }
-                ]
-            },
-            "streamSettings":{
-                "network":"tcp"
-            }
-        },
-        {
-            "port":3001,
-            "listen":"127.0.0.1",
-            "protocol":"vless",
-            "settings":{
-                "clients":[
-                    {
-                        "id":"${UUID}"
-                    }
-                ],
-                "decryption":"none"
-            },
-            "streamSettings":{
-                "network":"ws",
-                "security":"none"
-            }
-        },
-        {
-            "port":3002,
-            "listen":"127.0.0.1",
-            "protocol":"vless",
-            "settings":{
-                "clients":[
-                    {
-                        "id":"${UUID}",
-                        "level":0
-                    }
-                ],
-                "decryption":"none"
-            },
-            "streamSettings":{
-                "network":"ws",
-                "security":"none",
-                "wsSettings":{
-                    "path":"/${WS_PATH}-vl"
-                }
-            },
-            "sniffing":{
-                "enabled":false,
-                "destOverride":[
-                    "http",
-                    "tls"
-                ],
-                "metadataOnly":false
-            }
-        },
-        {
-            "port":3003,
-            "listen":"127.0.0.1",
-            "protocol":"vmess",
-            "settings":{
-                "clients":[
-                    {
-                        "id":"${UUID}",
-                        "alterId":0
-                    }
-                ]
-            },
-            "streamSettings":{
-                "network":"ws",
-                "wsSettings":{
-                    "path":"/${WS_PATH}-vm"
-                }
-            },
-            "sniffing":{
-                "enabled":false,
-                "destOverride":[
-                    "http",
-                    "tls"
-                ],
-                "metadataOnly":false
-            }
-        },
-        {
-            "port":3004,
-            "listen":"127.0.0.1",
-            "protocol":"trojan",
-            "settings":{
-                "clients":[
-                    {
-                        "password":"${UUID}"
-                    }
-                ]
-            },
-            "streamSettings":{
-                "network":"ws",
-                "security":"none",
-                "wsSettings":{
-                    "path":"/${WS_PATH}-tr"
-                }
-            },
-            "sniffing":{
-                "enabled":false,
-                "destOverride":[
-                    "http",
-                    "tls"
-                ],
-                "metadataOnly":false
-            }
-        },
-        {
-            "port":3005,
-            "listen":"127.0.0.1",
-            "protocol":"shadowsocks",
-            "settings":{
-                "clients":[
-                    {
-                        "method":"chacha20-ietf-poly1305",
-                        "password":"${UUID}"
-                    }
-                ],
-                "decryption":"none"
-            },
-            "streamSettings":{
-                "network":"ws",
-                "wsSettings":{
-                    "path":"/${WS_PATH}-sh"
-                }
-            },
-            "sniffing":{
-                "enabled":false,
-                "destOverride":[
-                    "http",
-                    "tls"
-                ],
-                "metadataOnly":false
-            }
-        }
-    ],
-    "dns":{
-        "servers":[
-            "https+local://8.8.8.8/dns-query"
-        ]
-    }
+	"log": {
+		"disabled": false,
+		"level": "info",
+		"output": "/dev/null",
+		"timestamp": true
+	},
+	"inbounds": [
+		{
+			"type": "vmess",
+			"tag": "vmess-in",
+      "listen":"::",
+      "listen_port":$START_PORT,
+			"tcp_fast_open": false,
+			"sniff": false,
+			"sniff_override_destination": false,
+			"proxy_protocol": false,
+			"users": [
+				{
+					"name": "sing-box",
+					"uuid": "${UUID}",
+					"alterId": 0
+				}
+			],
+			"transport": {
+				"type": "ws",
+				"path": "/${WS_PATH}-vm"
+			}
+		},
+		{
+			"type": "vless",
+			"tag": "vless-in",
+      "listen":"::",
+      "listen_port":$((START_PORT+1)),
+			"tcp_fast_open": false,
+			"sniff": false,
+			"sniff_override_destination": false,
+			"proxy_protocol": false,
+			"users": [
+				{
+					"name": "sing-box",
+					"uuid": "${UUID}"
+				}
+			],
+			"transport": {
+				"type": "ws",
+				"path": "/${WS_PATH}-vl"
+			}
+		},
+		{
+			"type": "trojan",
+			"tag": "trojan-in",
+      "listen":"::",
+      "listen_port":$((START_PORT+2)),
+			"tcp_fast_open": false,
+			"sniff": false,
+			"sniff_override_destination": false,
+			"proxy_protocol": false,
+			"users": [
+				{
+					"name": "sing-box",
+					"password": "${UUID}"
+				}
+			],
+			"transport": {
+				"type": "ws",
+				"path": "/${WS_PATH}-tr"
+			}
+		}
+	]
 }
 EOF
-  cat > $WORK_DIR/outbound.json << EOF
+  cat > $WORK_DIR/01_outbounds.json << EOF
 {
     "outbounds":[
         {
-            "protocol":"freedom"
+            "type":"direct",
+            "tag":"direct"
+        },
+        {
+            "type":"direct",
+            "tag":"warp-IPv4-out",
+            "detour":"wireguard-out",
+            "domain_strategy":"ipv4_only"
+        },
+        {
+            "type":"direct",
+            "tag":"warp-IPv6-out",
+            "detour":"wireguard-out",
+            "domain_strategy":"ipv6_only"
+        },
+        {
+            "type":"wireguard",
+            "tag":"wireguard-out",
+            "server":"162.159.192.1",
+            "server_port":2408,
+            "local_address":[
+                "172.16.0.2/32",
+                "2606:4700:110:8a36:df92:102a:9602:fa18/128"
+            ],
+            "private_key":"YFYOAdbw1bKTHlNNi+aEjBM3BO7unuFC5rOkMRAz9XY=",
+            "peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "reserved":[
+                78,
+                135,
+                76
+            ],
+            "mtu":1280
         }
     ]
+}
+EOF
+  cat > $WORK_DIR/02_route.json << EOF
+{
+    "route":{
+        "geoip":{
+            "download_url":"https://github.com/SagerNet/sing-geoip/releases/latest/download/geoip.db",
+            "download_detour":"direct"
+        },
+        "geosite":{
+            "download_url":"https://github.com/SagerNet/sing-geosite/releases/latest/download/geosite.db",
+            "download_detour":"direct"
+        },
+        "rules":[
+            {
+                "geosite":[
+                    "openai"
+                ],
+                "outbound":"warp-IPv6-out"
+            }
+        ]
+    }
 }
 EOF
 
