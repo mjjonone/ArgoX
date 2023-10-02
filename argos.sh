@@ -161,9 +161,9 @@ check_root() {
 check_arch() {
   # 判断处理器架构
   case $(uname -m) in
-    aarch64|arm64 ) ARGO_ARCH=arm64 ; ARCH=arm64-v8a ;;
-    x86_64|amd64 ) ARGO_ARCH=amd64 ; ARCH=64 ;;
-    armv7l ) ARGO_ARCH=arm ; ARCH=arm32-v7a ;;
+    aarch64|arm64 ) ARGO_ARCH=arm64 ; ARCH=arm64 ;;
+    x86_64|amd64 ) ARGO_ARCH=amd64 ; ARCH=amd64 ;;
+    armv7l ) ARGO_ARCH=arm ; ARCH=armv7 ;;
  #   s390x ) ARCHITECTURE=s390x ;;
     * ) error " $(text_eval 25) " ;;
   esac
@@ -173,13 +173,14 @@ check_arch() {
 check_install() {
   STATUS[0]=$(text 26) && [ -s /etc/systemd/system/argo.service ] && STATUS[0]=$(text 27) && [ "$(systemctl is-active argo)" = 'active' ] && STATUS[0]=$(text 28)
   [[ ${STATUS[0]} = "$(text 26)" ]] && [ ! -s $WORK_DIR/cloudflared ] && { wget -qO $TEMP_DIR/cloudflared $CDN/https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$ARGO_ARCH >/dev/null 2>&1 && chmod +x $TEMP_DIR/cloudflared >/dev/null 2>&1; }&
-  STATUS[1]=$(text 26) && [ -s /etc/systemd/system/sing-box.service ] && STATUS=$(text 27) && [ "$(systemctl is-active sing-box)" = 'active' ] && STATUS=$(text 28)
-  if [[ $STATUS[1] = "$(text 26)" ]] && [ ! -s $WORK_DIR/sing-box ]; then
+   [ -s /etc/systemd/system/sing-box.service ] && STATUS=$(text 27) && [ "$(systemctl is-active sing-box)" = 'active' ] && STATUS=$(text 28)
+  if 7
+  [ ! -s $WORK_DIR/sing-box ]; then
     {
     local ONLINE=$(wget -qO- "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep "tag_name" | sed "s@.*\"v\(.*\)\",@\1@g")
     wget -qO $TEMP_DIR/sing-box.tar.gz $CDN/https://github.com/SagerNet/sing-box/releases/download/v$ONLINE/sing-box-$ONLINE-linux-$ARCH.tar.gz >/dev/null 2>&1
-    tar xzf $TEMP_DIR/sing-box.tar.gz -C $TEMP_DIR sing-box-$ONLINE-linux-$ARCH/sing-box >/dev/null 2>&1
-    mv $TEMP_DIR/sing-box-$ONLINE-linux-$ARCH/sing-box $TEMP_DIR >/dev/null 2>&1
+    tar xzf $TEMP_DIR/sing-box.tar.gz -C $TEMP_DIR sing-box-$ONLINE-linux-$ARCH/sing-box 
+    mv $TEMP_DIR/sing-box-$ONLINE-linux-$ARCH/sing-box $TEMP_DIR 
     }&
   fi
 }
@@ -378,7 +379,7 @@ EOF
 
   # 生成配置文件及守护进程文件
   local i=1
-  [ ! -s $WORK_DIR/sing-box ] && wait && while [ "$i" -le 20 ]; do [[ -s $TEMP_DIR/sing-box ]] && mv $TEMP_DIR/{sing-box} $WORK_DIR && break; ((i++)); sleep 2; done
+  [ ! -s $WORK_DIR/sing-box ] && wait && while [ "$i" -le 20 ]; do [[ -s $TEMP_DIR/sing-box ]] && mv $TEMP_DIR/sing-box $WORK_DIR && break; ((i++)); sleep 2; done
   [ "$i" -ge 20 ] && local APP=sing-box && error "\n $(text_eval 48) "
   cat > $WORK_DIR/inbound.json << EOF
 {
